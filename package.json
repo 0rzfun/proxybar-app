@@ -1,0 +1,24 @@
+{
+  "name": "proxybar",
+  "private": true,
+  "version": "0.2.0",
+  "description": "A lightweight macOS and Windows tray proxy switcher built with Tauri.",
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/fetch-sing-box.mjs host && tauri dev",
+    "build:web": "tsc --noEmit && vite build",
+    "mac": "node scripts/build.mjs macos",
+    "mac:x64": "node scripts/build.mjs macos-x64",
+    "windows": "node scripts/build.mjs windows",
+    "check": "node scripts/fetch-sing-box.mjs host && npm run build:web && cargo fmt --manifest-path src-tauri/Cargo.toml --check && cargo check --manifest-path src-tauri/Cargo.toml",
+    "test": "node scripts/fetch-sing-box.mjs host && cargo test --manifest-path src-tauri/Cargo.toml"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.11.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4",
+    "typescript": "^6.0.0",
+    "vite": "^8.1.5"
+  }
+}

@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="下载 ProxyBar 最新的 macOS Intel、Apple Silicon、Universal 和 Windows x64 版本。"
+    />
+    <title>ProxyBar 下载</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="page-shell">
+      <section class="hero">
+        <div class="brand-mark" aria-hidden="true">P</div>
+        <div>
+          <p class="eyebrow">PROXYBAR</p>
+          <h1>下载最新版本</h1>
+          <p class="intro">轻量的 macOS 菜单栏与 Windows 托盘代理客户端。</p>
+        </div>
+      </section>
+
+      <div class="build-status" aria-live="polite">
+        <span class="status-dot"></span>
+        <span id="build-summary">正在读取最近构建信息…</span>
+      </div>
+
+      <section class="downloads" aria-label="软件下载">
+        <article class="download-card recommended">
+          <div>
+            <div class="card-heading">
+              <span class="platform-icon" aria-hidden="true">⌘</span>
+              <div>
+                <p class="platform">macOS</p>
+                <h2>Universal</h2>
+              </div>
+            </div>
+            <p>同时支持 Intel 与 Apple Silicon，适合不确定 Mac 芯片型号的用户。</p>
+          </div>
+          <a class="download-button" href="./downloads/ProxyBar-macOS-Universal.zip" download>
+            下载 Universal ZIP
+          </a>
+          <span class="badge">推荐</span>
+        </article>
+
+        <article class="download-card">
+          <div>
+            <div class="card-heading">
+              <span class="platform-icon" aria-hidden="true">⌘</span>
+              <div>
+                <p class="platform">macOS</p>
+                <h2>Apple Silicon</h2>
+              </div>
+            </div>
+            <p>适用于搭载 Apple M 系列芯片的 Mac。</p>
+          </div>
+          <a class="download-button" href="./downloads/ProxyBar-macOS-Apple-Silicon.zip" download>
+            下载 Apple Silicon ZIP
+          </a>
+        </article>
+
+        <article class="download-card">
+          <div>
+            <div class="card-heading">
+              <span class="platform-icon" aria-hidden="true">⌘</span>
+              <div>
+                <p class="platform">macOS</p>
+                <h2>Intel</h2>
+              </div>
+            </div>
+            <p>适用于搭载 Intel 处理器的 Mac。</p>
+          </div>
+          <a class="download-button" href="./downloads/ProxyBar-macOS-Intel.zip" download>
+            下载 Intel ZIP
+          </a>
+        </article>
+
+        <article class="download-card">
+          <div>
+            <div class="card-heading">
+              <span class="platform-icon windows-icon" aria-hidden="true">⊞</span>
+              <div>
+                <p class="platform">Windows</p>
+                <h2>x64 便携版</h2>
+              </div>
+            </div>
+            <p>适用于 Windows 10/11 x64，解压后运行 <code>ProxyBar.exe</code>。</p>
+          </div>
+          <a class="download-button" href="./downloads/ProxyBar-Windows-x64.zip" download>
+            下载 Windows ZIP
+          </a>
+        </article>
+      </section>
+
+      <section class="notice">
+        <h2>安装提示</h2>
+        <p>
+          当前自动构建版本未使用正式开发者证书签名。macOS 首次打开时可能需要在 Finder 中右键选择“打开”；
+          Windows 可能显示 SmartScreen 提示。请只从本页面下载并自行确认来源。
+        </p>
+      </section>
+
+      <footer>
+        <span>ProxyBar</span>
+        <div class="footer-links">
+          <a href="https://github.com/yjw0628/proxybar-app/releases/tag/continuous">GitHub Release</a>
+          <a href="https://github.com/yjw0628/proxybar-app">查看 GitHub 仓库</a>
+        </div>
+      </footer>
+    </main>
+
+    <script src="./app.js" defer></script>
+  </body>
+</html>

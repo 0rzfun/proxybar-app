@@ -1,0 +1,53 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "ProxyBar",
+  "version": "0.2.0",
+  "identifier": "win.orz.proxybar",
+  "build": {
+    "beforeDevCommand": "vite --host 127.0.0.1 --port 1420",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "npm run build:web",
+    "frontendDist": "../.build/web"
+  },
+  "app": {
+    "macOSPrivateApi": false,
+    "windows": [
+      {
+        "label": "settings",
+        "title": "ProxyBar",
+        "width": 500,
+        "height": 350,
+        "visible": false,
+        "resizable": false,
+        "maximizable": false,
+        "minimizable": false,
+        "center": true,
+        "skipTaskbar": true
+      }
+    ],
+    "security": { "csp": null }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "nsis"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": {
+      "../assets/common/locales/": "assets/common/locales/",
+      "../assets/common/tray/": "assets/common/tray/",
+      "../assets/common/licenses/": "assets/common/licenses/"
+    },
+    "macOS": {
+      "minimumSystemVersion": "10.15",
+      "infoPlist": "Info.plist"
+    },
+    "windows": {
+      "nsis": { "installerIcon": "icons/icon.ico" }
+    }
+  }
+}

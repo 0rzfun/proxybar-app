@@ -1,0 +1,10 @@
+/node_modules/
+/.build/
+/release/
+.DS_Store
+*.journal
+screenshot-*.png
+TODO.md
+/src-tauri/gen/
+/assets/common/licenses/
+/assets/platforms/

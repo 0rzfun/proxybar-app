@@ -1,0 +1,7 @@
+{
+  "bundle": {
+    "resources": {
+      "../assets/platforms/windows/": "assets/platform/"
+    }
+  }
+}

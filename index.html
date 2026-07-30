@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ProxyBar</title>
+    <script type="module" src="/src/main.ts"></script>
+  </head>
+  <body>
+    <main class="card">
+      <div class="brand">
+        <div class="logo" aria-hidden="true">➤</div>
+        <div>
+          <h1 id="title">设置</h1>
+          <p id="description">配置订阅和本地代理端口</p>
+        </div>
+      </div>
+      <form id="settings-form">
+        <div class="field">
+          <label id="subscription-label" for="subscription-url">订阅地址</label>
+          <input id="subscription-url" type="url" autocomplete="url" spellcheck="false" />
+        </div>
+        <div class="field field-port">
+          <label id="proxy-port-label" for="proxy-port">本地代理端口</label>
+          <input id="proxy-port" type="number" inputmode="numeric" min="1024" max="65535" step="1" required />
+        </div>
+        <p id="error" role="alert"></p>
+        <div class="actions">
+          <button id="cancel" type="button">取消</button>
+          <button id="save" type="submit" class="primary">确定</button>
+        </div>
+      </form>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,185 @@
+name: Build and publish downloads
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: proxybar-pages
+  cancel-in-progress: false
+
+jobs:
+  build-macos:
+    name: Build macOS packages
+    runs-on: macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin,aarch64-apple-darwin
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build all macOS variants
+        run: npm run mac
+
+      - name: Create macOS ZIP packages
+        run: |
+          mkdir -p dist
+          ditto -c -k --sequesterRsrc --keepParent release/macos/ProxyBar-Intel.app dist/ProxyBar-macOS-Intel.zip
+          ditto -c -k --sequesterRsrc --keepParent release/macos/ProxyBar-Apple-Silicon.app dist/ProxyBar-macOS-Apple-Silicon.zip
+          ditto -c -k --sequesterRsrc --keepParent release/macos/ProxyBar-Universal.app dist/ProxyBar-macOS-Universal.zip
+
+      - name: Upload macOS packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: proxybar-macos-packages
+          path: dist/*.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  build-windows:
+    name: Build Windows package
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build Windows portable package
+        env:
+          WINDOWS_TARGET: x86_64-pc-windows-msvc
+        run: npm run windows
+
+      - name: Create Windows ZIP package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path release/windows/portable/* -DestinationPath dist/ProxyBar-Windows-x64.zip -CompressionLevel Optimal
+
+      - name: Upload Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: proxybar-windows-package
+          path: dist/ProxyBar-Windows-x64.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-pages:
+    name: Publish download page
+    if: github.ref == 'refs/heads/master'
+    needs:
+      - build-macos
+      - build-windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Prepare website
+        run: |
+          mkdir -p site/downloads
+          cp -R pages/. site/
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - name: Download macOS packages
+        uses: actions/download-artifact@v4
+        with:
+          name: proxybar-macos-packages
+          path: site/downloads
+
+      - name: Download Windows package
+        uses: actions/download-artifact@v4
+        with:
+          name: proxybar-windows-package
+          path: site/downloads
+
+      - name: Publish rolling GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          release_title="ProxyBar 最新自动构建"
+          release_notes=$(printf '由 GitHub Actions 从 `master` 自动构建。\n\n提交：`%s`\n\n这是未经正式开发者证书签名的预发布版本。' "$GITHUB_SHA")
+
+          git tag --force continuous "$GITHUB_SHA"
+          git push --force origin refs/tags/continuous
+
+          if gh release view continuous >/dev/null 2>&1; then
+            gh release edit continuous \
+              --title "$release_title" \
+              --notes "$release_notes" \
+              --prerelease \
+              --latest=false
+            gh release upload continuous \
+              'site/downloads/ProxyBar-macOS-Intel.zip#macOS Intel' \
+              'site/downloads/ProxyBar-macOS-Apple-Silicon.zip#macOS Apple Silicon' \
+              'site/downloads/ProxyBar-macOS-Universal.zip#macOS Universal' \
+              'site/downloads/ProxyBar-Windows-x64.zip#Windows x64 Portable' \
+              --clobber
+          else
+            gh release create continuous \
+              'site/downloads/ProxyBar-macOS-Intel.zip#macOS Intel' \
+              'site/downloads/ProxyBar-macOS-Apple-Silicon.zip#macOS Apple Silicon' \
+              'site/downloads/ProxyBar-macOS-Universal.zip#macOS Universal' \
+              'site/downloads/ProxyBar-Windows-x64.zip#Windows x64 Portable' \
+              --verify-tag \
+              --title "$release_title" \
+              --notes "$release_notes" \
+              --prerelease \
+              --latest=false
+          fi
+
+      - name: Write build metadata
+        run: |
+          node -e "require('fs').writeFileSync('site/build-info.json', JSON.stringify({ commit: process.env.GITHUB_SHA.slice(0, 7), builtAt: new Date().toISOString() }, null, 2) + '\n')"
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Deploy GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

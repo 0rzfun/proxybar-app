@@ -1,0 +1,7 @@
+{
+  "bundle": {
+    "resources": {
+      "../assets/platforms/macos/": "assets/platform/"
+    }
+  }
+}
