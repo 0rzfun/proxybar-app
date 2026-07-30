@@ -125,7 +125,7 @@ ProxyBar-macOS-Universal.zip
 ProxyBar-Windows-x64.zip
 ```
 
-两个平台都构建成功后，工作流会把四个软件包和 `pages/` 中的下载页部署到 GitHub Pages，并更新标签为 `continuous` 的“ProxyBar 最新自动构建”预发布 Release。Pages 和 Release 都只提供最近一次成功构建的软件包。Windows ZIP 是便携版，解压后运行 `ProxyBar.exe`。
+工作流会分别检查四个软件包。单个平台或单个软件包失败时记录 warning，不阻止其他成功软件包部署到 GitHub Pages，也不阻止更新标签为 `continuous` 的“ProxyBar 最新自动构建”预发布 Release；只有四个软件包全部失败时工作流才标记为失败并停止发布。Pages 和 Release 只提供本次实际构建成功的软件包，下载页会把缺失的软件包标记为不可用。Windows ZIP 是便携版，解压后运行 `ProxyBar.exe`。
 
 首次使用时，需要在 GitHub 仓库的 **Settings → Pages → Build and deployment → Source** 中选择 **GitHub Actions**。工作流也可以在仓库的 **Actions → Build and publish downloads** 页面手动运行。
 

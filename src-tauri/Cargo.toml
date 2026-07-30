@@ -25,7 +25,7 @@ url = "2"
 
 [target.'cfg(windows)'.dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }
-windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
+windows-sys = { version = "0.61", features = ["Win32_System_Console", "Win32_UI_WindowsAndMessaging"] }
 
 [target.'cfg(not(windows))'.dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

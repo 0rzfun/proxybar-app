@@ -77,10 +77,12 @@ fn start_child(paths: &AppPaths) -> Result<ManagedProcess> {
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(log));
-    hide_console(&mut command);
-    Ok(ManagedProcess::Child(command.spawn().with_context(
-        || format!("failed to start {}", paths.sing_box.display()),
-    )?))
+    configure_managed_process(&mut command);
+    let child = command
+        .spawn()
+        .with_context(|| format!("failed to start {}", paths.sing_box.display()))?;
+    hide_managed_process_console(&child);
+    Ok(ManagedProcess::Child(child))
 }
 
 async fn wait_until_ready(
@@ -260,16 +262,49 @@ fn elevated_launch_command(binary: &str, config: &str, log: &str, pid: &str) -> 
 #[cfg(windows)]
 fn hide_console(command: &mut Command) {
     use std::os::windows::process::CommandExt;
-    const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-    command
-        .as_std_mut()
-        .creation_flags(CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP)
-        .show_window(0);
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.as_std_mut().creation_flags(CREATE_NO_WINDOW);
 }
 
 #[cfg(not(windows))]
 fn hide_console(_: &mut Command) {}
+
+#[cfg(windows)]
+fn configure_managed_process(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    command
+        .as_std_mut()
+        .creation_flags(CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP);
+}
+
+#[cfg(not(windows))]
+fn configure_managed_process(_: &mut Command) {}
+
+#[cfg(windows)]
+fn hide_managed_process_console(child: &tokio::process::Child) {
+    use windows_sys::Win32::{
+        System::Console::{AttachConsole, FreeConsole, GetConsoleWindow},
+        UI::WindowsAndMessaging::{ShowWindow, SW_HIDE},
+    };
+
+    let Some(pid) = child.id() else { return };
+    unsafe {
+        // Release builds use the Windows GUI subsystem and therefore have no
+        // console of their own. Keep an attached development console intact.
+        if GetConsoleWindow().is_null() && AttachConsole(pid) != 0 {
+            let window = GetConsoleWindow();
+            if !window.is_null() {
+                let _ = ShowWindow(window, SW_HIDE);
+            }
+            let _ = FreeConsole();
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn hide_managed_process_console(_: &tokio::process::Child) {}
 
 #[cfg(windows)]
 fn send_windows_interrupt(pid: u32) {

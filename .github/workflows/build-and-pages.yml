@@ -17,6 +17,7 @@ jobs:
   build-macos:
     name: Build macOS packages
     runs-on: macos-latest
+    continue-on-error: true
 
     steps:
       - name: Check out repository
@@ -37,26 +38,75 @@ jobs:
         run: npm ci
 
       - name: Build all macOS variants
+        id: build_macos
+        continue-on-error: true
         run: npm run mac
 
-      - name: Create macOS ZIP packages
+      - name: Create macOS Intel ZIP package
+        id: package_macos_intel
+        if: always()
+        continue-on-error: true
         run: |
           mkdir -p dist
-          ditto -c -k --sequesterRsrc --keepParent release/macos/ProxyBar-Intel.app dist/ProxyBar-macOS-Intel.zip
-          ditto -c -k --sequesterRsrc --keepParent release/macos/ProxyBar-Apple-Silicon.app dist/ProxyBar-macOS-Apple-Silicon.zip
-          ditto -c -k --sequesterRsrc --keepParent release/macos/ProxyBar-Universal.app dist/ProxyBar-macOS-Universal.zip
+          if [[ -d release/macos/ProxyBar-Intel.app ]]; then
+            rm -f dist/ProxyBar-macOS-Intel.zip dist/ProxyBar-macOS-Intel.partial.zip
+            ditto -c -k --sequesterRsrc --keepParent release/macos/ProxyBar-Intel.app dist/ProxyBar-macOS-Intel.partial.zip
+            mv dist/ProxyBar-macOS-Intel.partial.zip dist/ProxyBar-macOS-Intel.zip
+          fi
+
+      - name: Create macOS Apple Silicon ZIP package
+        id: package_macos_arm64
+        if: always()
+        continue-on-error: true
+        run: |
+          mkdir -p dist
+          if [[ -d release/macos/ProxyBar-Apple-Silicon.app ]]; then
+            rm -f dist/ProxyBar-macOS-Apple-Silicon.zip dist/ProxyBar-macOS-Apple-Silicon.partial.zip
+            ditto -c -k --sequesterRsrc --keepParent release/macos/ProxyBar-Apple-Silicon.app dist/ProxyBar-macOS-Apple-Silicon.partial.zip
+            mv dist/ProxyBar-macOS-Apple-Silicon.partial.zip dist/ProxyBar-macOS-Apple-Silicon.zip
+          fi
+
+      - name: Create macOS Universal ZIP package
+        id: package_macos_universal
+        if: always()
+        continue-on-error: true
+        run: |
+          mkdir -p dist
+          if [[ -d release/macos/ProxyBar-Universal.app ]]; then
+            rm -f dist/ProxyBar-macOS-Universal.zip dist/ProxyBar-macOS-Universal.partial.zip
+            ditto -c -k --sequesterRsrc --keepParent release/macos/ProxyBar-Universal.app dist/ProxyBar-macOS-Universal.partial.zip
+            mv dist/ProxyBar-macOS-Universal.partial.zip dist/ProxyBar-macOS-Universal.zip
+          fi
+
+      - name: Report missing macOS packages
+        if: always()
+        run: |
+          mkdir -p dist
+          rm -f dist/*.partial.zip
+          for package in \
+            ProxyBar-macOS-Intel.zip \
+            ProxyBar-macOS-Apple-Silicon.zip \
+            ProxyBar-macOS-Universal.zip
+          do
+            if [[ ! -s "dist/$package" ]]; then
+              echo "::warning title=macOS package unavailable::$package was not produced; other packages will still be published."
+            fi
+          done
+          printf '%s\n' "$GITHUB_SHA" > dist/macos-build.txt
 
       - name: Upload macOS packages
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: proxybar-macos-packages
-          path: dist/*.zip
+          path: dist/
           if-no-files-found: error
           retention-days: 7
 
   build-windows:
     name: Build Windows package
     runs-on: windows-latest
+    continue-on-error: true
 
     steps:
       - name: Check out repository
@@ -77,27 +127,48 @@ jobs:
         run: npm ci
 
       - name: Build Windows portable package
+        id: build_windows
+        continue-on-error: true
         env:
           WINDOWS_TARGET: x86_64-pc-windows-msvc
         run: npm run windows
 
       - name: Create Windows ZIP package
+        id: package_windows
+        if: always()
+        continue-on-error: true
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Compress-Archive -Path release/windows/portable/* -DestinationPath dist/ProxyBar-Windows-x64.zip -CompressionLevel Optimal
+          if (Test-Path release/windows/portable/ProxyBar.exe) {
+            Remove-Item dist/ProxyBar-Windows-x64.zip, dist/ProxyBar-Windows-x64.partial.zip -Force -ErrorAction SilentlyContinue
+            Compress-Archive -Path release/windows/portable/* -DestinationPath dist/ProxyBar-Windows-x64.partial.zip -CompressionLevel Optimal
+            Move-Item dist/ProxyBar-Windows-x64.partial.zip dist/ProxyBar-Windows-x64.zip
+          }
+
+      - name: Report missing Windows package
+        if: always()
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Remove-Item dist/*.partial.zip -Force -ErrorAction SilentlyContinue
+          if (-not (Test-Path dist/ProxyBar-Windows-x64.zip) -or (Get-Item dist/ProxyBar-Windows-x64.zip).Length -eq 0) {
+            Write-Output "::warning title=Windows package unavailable::ProxyBar-Windows-x64.zip was not produced; other packages will still be published."
+          }
+          Set-Content -Path dist/windows-build.txt -Value $env:GITHUB_SHA
 
       - name: Upload Windows package
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: proxybar-windows-package
-          path: dist/ProxyBar-Windows-x64.zip
+          path: dist/
           if-no-files-found: error
           retention-days: 7
 
   publish-pages:
     name: Publish download page
-    if: github.ref == 'refs/heads/master'
+    if: always()
     needs:
       - build-macos
       - build-windows
@@ -120,28 +191,83 @@ jobs:
           cp -R pages/. site/
 
       - name: Configure GitHub Pages
+        if: github.ref == 'refs/heads/master'
         uses: actions/configure-pages@v5
         with:
           enablement: true
 
       - name: Download macOS packages
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: proxybar-macos-packages
-          path: site/downloads
+          path: .build/downloads/macos
 
       - name: Download Windows package
+        continue-on-error: true
         uses: actions/download-artifact@v4
         with:
           name: proxybar-windows-package
-          path: site/downloads
+          path: .build/downloads/windows
+
+      - name: Evaluate available packages
+        id: packages
+        run: |
+          expected=(
+            ProxyBar-macOS-Intel.zip
+            ProxyBar-macOS-Apple-Silicon.zip
+            ProxyBar-macOS-Universal.zip
+            ProxyBar-Windows-x64.zip
+          )
+          available=()
+          for package in "${expected[@]}"; do
+            source=""
+            if [[ -s ".build/downloads/macos/$package" ]]; then
+              source=".build/downloads/macos/$package"
+            elif [[ -s ".build/downloads/windows/$package" ]]; then
+              source=".build/downloads/windows/$package"
+            fi
+            if [[ -n "$source" ]]; then
+              cp "$source" "site/downloads/$package"
+              available+=("$package")
+            else
+              echo "::warning title=Package unavailable::$package will be omitted from this release."
+            fi
+          done
+
+          if (( ${#available[@]} == 0 )); then
+            echo "::error title=All packages failed::None of the four application packages was produced."
+            exit 1
+          fi
+
+          available_csv=$(IFS=,; echo "${available[*]}")
+          echo "available=$available_csv" >> "$GITHUB_OUTPUT"
+          echo "count=${#available[@]}" >> "$GITHUB_OUTPUT"
+          if (( ${#available[@]} < ${#expected[@]} )); then
+            echo "::warning title=Partial release::Publishing ${#available[@]} of ${#expected[@]} application packages."
+          fi
 
       - name: Publish rolling GitHub Release
+        if: github.ref == 'refs/heads/master'
         env:
           GH_TOKEN: ${{ github.token }}
+          PACKAGE_COUNT: ${{ steps.packages.outputs.count }}
         run: |
           release_title="ProxyBar 最新自动构建"
-          release_notes=$(printf '由 GitHub Actions 从 `master` 自动构建。\n\n提交：`%s`\n\n这是未经正式开发者证书签名的预发布版本。' "$GITHUB_SHA")
+          release_notes=$(printf '由 GitHub Actions 从 `master` 自动构建。\n\n提交：`%s`\n\n本次提供 %s/4 个软件包。\n\n这是未经正式开发者证书签名的预发布版本。' "$GITHUB_SHA" "$PACKAGE_COUNT")
+          assets=()
+          if [[ -s site/downloads/ProxyBar-macOS-Intel.zip ]]; then
+            assets+=("site/downloads/ProxyBar-macOS-Intel.zip#macOS Intel")
+          fi
+          if [[ -s site/downloads/ProxyBar-macOS-Apple-Silicon.zip ]]; then
+            assets+=("site/downloads/ProxyBar-macOS-Apple-Silicon.zip#macOS Apple Silicon")
+          fi
+          if [[ -s site/downloads/ProxyBar-macOS-Universal.zip ]]; then
+            assets+=("site/downloads/ProxyBar-macOS-Universal.zip#macOS Universal")
+          fi
+          if [[ -s site/downloads/ProxyBar-Windows-x64.zip ]]; then
+            assets+=("site/downloads/ProxyBar-Windows-x64.zip#Windows x64 Portable")
+          fi
 
           git tag --force continuous "$GITHUB_SHA"
           git push --force origin refs/tags/continuous
@@ -152,18 +278,17 @@ jobs:
               --notes "$release_notes" \
               --prerelease \
               --latest=false
-            gh release upload continuous \
-              'site/downloads/ProxyBar-macOS-Intel.zip#macOS Intel' \
-              'site/downloads/ProxyBar-macOS-Apple-Silicon.zip#macOS Apple Silicon' \
-              'site/downloads/ProxyBar-macOS-Universal.zip#macOS Universal' \
-              'site/downloads/ProxyBar-Windows-x64.zip#Windows x64 Portable' \
-              --clobber
+            for package in \
+              ProxyBar-macOS-Intel.zip \
+              ProxyBar-macOS-Apple-Silicon.zip \
+              ProxyBar-macOS-Universal.zip \
+              ProxyBar-Windows-x64.zip
+            do
+              gh release delete-asset continuous "$package" --yes >/dev/null 2>&1 || true
+            done
+            gh release upload continuous "${assets[@]}"
           else
-            gh release create continuous \
-              'site/downloads/ProxyBar-macOS-Intel.zip#macOS Intel' \
-              'site/downloads/ProxyBar-macOS-Apple-Silicon.zip#macOS Apple Silicon' \
-              'site/downloads/ProxyBar-macOS-Universal.zip#macOS Universal' \
-              'site/downloads/ProxyBar-Windows-x64.zip#Windows x64 Portable' \
+            gh release create continuous "${assets[@]}" \
               --verify-tag \
               --title "$release_title" \
               --notes "$release_notes" \
@@ -172,14 +297,19 @@ jobs:
           fi
 
       - name: Write build metadata
+        if: github.ref == 'refs/heads/master'
+        env:
+          AVAILABLE_PACKAGES: ${{ steps.packages.outputs.available }}
         run: |
-          node -e "require('fs').writeFileSync('site/build-info.json', JSON.stringify({ commit: process.env.GITHUB_SHA.slice(0, 7), builtAt: new Date().toISOString() }, null, 2) + '\n')"
+          node -e "require('fs').writeFileSync('site/build-info.json', JSON.stringify({ commit: process.env.GITHUB_SHA.slice(0, 7), builtAt: new Date().toISOString(), packages: process.env.AVAILABLE_PACKAGES.split(',').filter(Boolean) }, null, 2) + '\n')"
 
       - name: Upload GitHub Pages artifact
+        if: github.ref == 'refs/heads/master'
         uses: actions/upload-pages-artifact@v3
         with:
           path: site
 
       - name: Deploy GitHub Pages
+        if: github.ref == 'refs/heads/master'
         id: deployment
         uses: actions/deploy-pages@v4

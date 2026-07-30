@@ -190,6 +190,13 @@ code {
   transform: translateY(-1px);
 }
 
+.download-button.unavailable {
+  cursor: not-allowed;
+  color: #70798a;
+  background: #dfe3ea;
+  transform: none;
+}
+
 .download-button:focus-visible {
   outline: 3px solid rgba(64, 85, 212, 0.3);
   outline-offset: 3px;
