@@ -15,6 +15,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Mutex as StdMutex,
     },
+    time::Duration,
 };
 use tauri::{
     image::Image,
@@ -196,6 +197,8 @@ pub fn run() {
                 process: None,
                 subscription_loading: false,
                 status: String::new(),
+                restart_pending: false,
+                restart_attempts: 0,
             };
 
             let mode_items = create_tray(app.handle(), &runtime, &texts, &paths)?;
@@ -211,6 +214,7 @@ pub fn run() {
             });
 
             spawn_tray_theme_watcher(app.handle().clone());
+            spawn_proxy_watcher(app.handle().clone());
             if has_subscription {
                 spawn_refresh_subscription(app.handle().clone());
             } else {
@@ -430,9 +434,14 @@ fn tooltip(runtime: &Runtime, texts: &Texts) -> String {
         ProxyMode::Automatic => texts.get("mode_auto"),
         ProxyMode::Global => texts.get("mode_global"),
     };
-    match runtime.selected_node() {
+    let base = match runtime.selected_node() {
         Some(node) => format!("ProxyBar — {mode} — {}", node.name),
         None => format!("ProxyBar — {mode}"),
+    };
+    if runtime.restart_pending && !runtime.status.is_empty() {
+        format!("{base} — {}", runtime.status)
+    } else {
+        base
     }
 }
 
@@ -510,6 +519,85 @@ fn spawn_tray_theme_watcher(app: AppHandle) {
 #[cfg(not(target_os = "windows"))]
 fn spawn_tray_theme_watcher(_app: AppHandle) {}
 
+fn restart_delay(attempts: u32) -> Duration {
+    Duration::from_secs(match attempts {
+        0 => 2,
+        1 => 2,
+        2 => 5,
+        3 => 10,
+        _ => 30,
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProxyHealthCheck {
+    Skip,
+    Restart,
+    CheckPort(u16),
+}
+
+fn proxy_health_check(
+    mode: ProxyMode,
+    restart_pending: bool,
+    port: u16,
+    process_exited: Option<bool>,
+) -> ProxyHealthCheck {
+    if mode == ProxyMode::Off {
+        ProxyHealthCheck::Skip
+    } else if restart_pending {
+        ProxyHealthCheck::Restart
+    } else {
+        match process_exited {
+            Some(true) => ProxyHealthCheck::Restart,
+            Some(false) => ProxyHealthCheck::CheckPort(port),
+            None => ProxyHealthCheck::Skip,
+        }
+    }
+}
+
+fn spawn_proxy_watcher(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let delay = {
+                let state = app.state::<AppState>();
+                let runtime = state.inner.lock().await;
+                if runtime.restart_pending {
+                    restart_delay(runtime.restart_attempts)
+                } else {
+                    Duration::from_secs(2)
+                }
+            };
+            tokio::time::sleep(delay).await;
+
+            let state = app.state::<AppState>();
+            if state.quitting.load(Ordering::SeqCst) {
+                break;
+            }
+            let check = {
+                let mut runtime = state.inner.lock().await;
+                let exited = runtime
+                    .process
+                    .as_mut()
+                    .map(|process| proxy::process_exited(process).unwrap_or(true));
+                proxy_health_check(
+                    runtime.settings.mode,
+                    runtime.restart_pending,
+                    runtime.port,
+                    exited,
+                )
+            };
+            let unhealthy = match check {
+                ProxyHealthCheck::Skip => false,
+                ProxyHealthCheck::Restart => true,
+                ProxyHealthCheck::CheckPort(port) => !proxy::socks_port_ready(port).await,
+            };
+            if unhealthy {
+                let _ = restart_unhealthy_proxy(&app).await;
+            }
+        }
+    });
+}
+
 async fn rebuild_tray(app: &AppHandle) -> Result<()> {
     let state = app.state::<AppState>();
     let runtime = state.inner.lock().await;
@@ -535,6 +623,9 @@ async fn switch_mode(app: &AppHandle, mode: ProxyMode) -> Result<()> {
             return Err(anyhow!("请先在设置中填写订阅地址"));
         }
         runtime.settings.mode = mode;
+        runtime.restart_pending = false;
+        runtime.restart_attempts = 0;
+        runtime.status.clear();
         runtime.process.take()
     };
     proxy::stop_sing_box(&state.paths, old_process).await?;
@@ -567,6 +658,80 @@ async fn switch_mode(app: &AppHandle, mode: ProxyMode) -> Result<()> {
     Ok(())
 }
 
+async fn restart_unhealthy_proxy(app: &AppHandle) -> Result<()> {
+    let state = app.state::<AppState>();
+    let _transition = state.transition.lock().await;
+    if state.quitting.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+
+    let (pending, exited, port) = {
+        let mut runtime = state.inner.lock().await;
+        if runtime.settings.mode == ProxyMode::Off {
+            return Ok(());
+        }
+        let pending = runtime.restart_pending;
+        let port = runtime.port;
+        let exited = match runtime.process.as_mut() {
+            Some(process) => proxy::process_exited(process).unwrap_or(true),
+            None if pending => true,
+            None => return Ok(()),
+        };
+        (pending, exited, port)
+    };
+    if !pending && !exited && proxy::socks_port_ready(port).await {
+        return Ok(());
+    }
+
+    let (old_process, node, mode, configured_port, attempt) = {
+        let mut runtime = state.inner.lock().await;
+        if runtime.settings.mode == ProxyMode::Off {
+            return Ok(());
+        }
+        runtime.restart_pending = true;
+        runtime.restart_attempts = runtime.restart_attempts.saturating_add(1);
+        let attempt = runtime.restart_attempts;
+        runtime.status = format!("{} ({attempt})", state.texts.get("proxy_restarting"));
+        (
+            runtime.process.take(),
+            runtime.selected_node(),
+            runtime.settings.mode,
+            runtime.settings.proxy_port,
+            attempt,
+        )
+    };
+    rebuild_tray(app).await?;
+    proxy::stop_sing_box(&state.paths, old_process).await?;
+
+    let result = async {
+        let node = node.ok_or_else(|| anyhow!("请先刷新并选择节点"))?;
+        let port = proxy::available_port(configured_port).await?;
+        let process = proxy::start_sing_box(&state.paths, &node, port, mode).await?;
+        let mut runtime = state.inner.lock().await;
+        runtime.port = port;
+        runtime.process = Some(process);
+        runtime.restart_pending = false;
+        runtime.restart_attempts = 0;
+        runtime.status.clear();
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+
+    if let Err(error) = result {
+        let mut runtime = state.inner.lock().await;
+        runtime.restart_pending = true;
+        runtime.status = format!(
+            "{} ({attempt}): {error}",
+            state.texts.get("proxy_restart_failed")
+        );
+        drop(runtime);
+        let _ = rebuild_tray(app).await;
+        return Err(error);
+    }
+    rebuild_tray(app).await?;
+    Ok(())
+}
+
 async fn select_node(app: &AppHandle, index: usize) {
     let state = app.state::<AppState>();
     let mode = {
@@ -589,10 +754,13 @@ async fn select_node(app: &AppHandle, index: usize) {
 
 async fn recover_off(app: &AppHandle) {
     let state = app.state::<AppState>();
+    let _transition = state.transition.lock().await;
     let (process, settings) = {
         let mut runtime = state.inner.lock().await;
         let process = runtime.process.take();
         runtime.settings.mode = ProxyMode::Off;
+        runtime.restart_pending = false;
+        runtime.restart_attempts = 0;
         (process, runtime.settings.clone())
     };
     let _ = proxy::stop_sing_box(&state.paths, process).await;
@@ -672,8 +840,10 @@ async fn quit(app: &AppHandle) {
     if state.quitting.swap(true, Ordering::SeqCst) {
         return;
     }
+    let _transition = state.transition.lock().await;
     let process = {
         let mut runtime = state.inner.lock().await;
+        runtime.restart_pending = false;
         runtime.process.take()
     };
     let _ = proxy::stop_sing_box(&state.paths, process).await;
@@ -784,7 +954,12 @@ fn ensure_executable(path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_http_url, validate_optional_http_url};
+    use super::{
+        proxy_health_check, restart_delay, validate_http_url, validate_optional_http_url,
+        ProxyHealthCheck,
+    };
+    use crate::model::ProxyMode;
+    use std::time::Duration;
 
     #[test]
     fn empty_subscription_url_is_valid() {
@@ -798,5 +973,38 @@ mod tests {
     fn configured_subscription_url_still_requires_http() {
         assert!(validate_optional_http_url("ftp://example.com/sub", "订阅地址").is_err());
         assert!(validate_http_url("https://example.com/sub", "订阅地址").is_ok());
+    }
+
+    #[test]
+    fn proxy_restart_delay_is_bounded() {
+        assert_eq!(restart_delay(0), Duration::from_secs(2));
+        assert_eq!(restart_delay(2), Duration::from_secs(5));
+        assert_eq!(restart_delay(3), Duration::from_secs(10));
+        assert_eq!(restart_delay(4), Duration::from_secs(30));
+        assert_eq!(restart_delay(u32::MAX), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn proxy_health_check_only_restarts_active_unhealthy_processes() {
+        assert_eq!(
+            proxy_health_check(ProxyMode::Off, true, 10850, Some(true)),
+            ProxyHealthCheck::Skip
+        );
+        assert_eq!(
+            proxy_health_check(ProxyMode::Manual, false, 10850, None),
+            ProxyHealthCheck::Skip
+        );
+        assert_eq!(
+            proxy_health_check(ProxyMode::Manual, false, 10850, Some(false)),
+            ProxyHealthCheck::CheckPort(10850)
+        );
+        assert_eq!(
+            proxy_health_check(ProxyMode::Automatic, false, 10850, Some(true)),
+            ProxyHealthCheck::Restart
+        );
+        assert_eq!(
+            proxy_health_check(ProxyMode::Global, true, 10850, None),
+            ProxyHealthCheck::Restart
+        );
     }
 }

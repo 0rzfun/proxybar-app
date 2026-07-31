@@ -128,6 +128,8 @@ fn defaults() -> HashMap<String, String> {
         ("proxy_port_label", "Local proxy port"),
         ("confirm", "OK"),
         ("cancel", "Cancel"),
+        ("proxy_restarting", "Proxy process exited; restarting…"),
+        ("proxy_restart_failed", "Proxy restart failed"),
     ]
     .into_iter()
     .map(|(key, value)| (key.into(), value.into()))

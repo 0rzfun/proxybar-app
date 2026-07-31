@@ -1,6 +1,25 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+#[cfg(not(windows))]
 use tokio::process::Child;
+
+#[cfg(windows)]
+pub struct WindowsProcess {
+    pub pid: u32,
+    pub handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+#[cfg(windows)]
+unsafe impl Send for WindowsProcess {}
+
+#[cfg(windows)]
+impl Drop for WindowsProcess {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = windows_sys::Win32::Foundation::CloseHandle(self.handle);
+        }
+    }
+}
 
 pub const PORT_START: u16 = 10_850;
 
@@ -167,11 +186,12 @@ pub struct AppPaths {
 }
 
 pub enum ManagedProcess {
+    #[cfg(not(windows))]
     Child(Child),
+    #[cfg(windows)]
+    Windows(WindowsProcess),
     #[cfg(target_os = "macos")]
-    Elevated {
-        pid: u32,
-    },
+    Elevated { pid: u32 },
 }
 
 pub struct Runtime {
@@ -181,6 +201,8 @@ pub struct Runtime {
     pub port: u16,
     pub subscription_loading: bool,
     pub status: String,
+    pub restart_pending: bool,
+    pub restart_attempts: u32,
 }
 
 impl Runtime {

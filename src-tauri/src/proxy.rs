@@ -1,3 +1,5 @@
+#[cfg(windows)]
+use crate::model::WindowsProcess;
 use crate::model::{AppPaths, ManagedProcess, Node, ProxyMode};
 use anyhow::{anyhow, Context, Result};
 use std::{fs::OpenOptions, process::Stdio, time::Duration};
@@ -62,6 +64,7 @@ async fn validate_config(paths: &AppPaths) -> Result<()> {
     Err(anyhow!("sing-box configuration is invalid: {message}"))
 }
 
+#[cfg(not(windows))]
 fn start_child(paths: &AppPaths) -> Result<ManagedProcess> {
     let log = OpenOptions::new()
         .create(true)
@@ -77,12 +80,94 @@ fn start_child(paths: &AppPaths) -> Result<ManagedProcess> {
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(log));
-    configure_managed_process(&mut command);
-    let child = command
-        .spawn()
-        .with_context(|| format!("failed to start {}", paths.sing_box.display()))?;
-    hide_managed_process_console(&child);
-    Ok(ManagedProcess::Child(child))
+    Ok(ManagedProcess::Child(command.spawn().with_context(
+        || format!("failed to start {}", paths.sing_box.display()),
+    )?))
+}
+
+#[cfg(windows)]
+fn start_child(paths: &AppPaths) -> Result<ManagedProcess> {
+    use std::{ffi::OsString, os::windows::ffi::OsStrExt, os::windows::io::AsRawHandle};
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT},
+        System::Threading::{
+            CreateProcessW, CREATE_NEW_CONSOLE, CREATE_NEW_PROCESS_GROUP, PROCESS_INFORMATION,
+            STARTF_USESHOWWINDOW, STARTF_USESTDHANDLES, STARTUPINFOW,
+        },
+        UI::WindowsAndMessaging::SW_HIDE,
+    };
+
+    let log = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&paths.sing_box_log)?;
+    let stdin = OpenOptions::new().read(true).open("NUL")?;
+    let log_handle = log.as_raw_handle() as HANDLE;
+    let stdin_handle = stdin.as_raw_handle() as HANDLE;
+
+    for handle in [stdin_handle, log_handle] {
+        let changed =
+            unsafe { SetHandleInformation(handle, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) };
+        if changed == 0 {
+            return Err(std::io::Error::last_os_error())
+                .context("failed to inherit sing-box log handles");
+        }
+    }
+
+    let mut application: Vec<u16> = paths
+        .sing_box
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let mut command = OsString::new();
+    command.push("\"");
+    command.push(&paths.sing_box);
+    command.push("\" run -c \"");
+    command.push(&paths.sing_box_config);
+    command.push("\"");
+    let mut command: Vec<u16> = command.encode_wide().chain(Some(0)).collect();
+    let mut startup = STARTUPINFOW {
+        cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+        dwFlags: STARTF_USESHOWWINDOW | STARTF_USESTDHANDLES,
+        wShowWindow: SW_HIDE as u16,
+        hStdInput: stdin_handle,
+        hStdOutput: log_handle,
+        hStdError: log_handle,
+        ..Default::default()
+    };
+    let mut process = PROCESS_INFORMATION::default();
+    let created = unsafe {
+        CreateProcessW(
+            application.as_mut_ptr(),
+            command.as_mut_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1,
+            CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP,
+            std::ptr::null(),
+            std::ptr::null(),
+            &mut startup,
+            &mut process,
+        )
+    };
+    for handle in [stdin_handle, log_handle] {
+        unsafe {
+            let _ = SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0);
+        }
+    }
+    if created == 0 {
+        return Err(std::io::Error::last_os_error())
+            .with_context(|| format!("failed to start {}", paths.sing_box.display()));
+    }
+    unsafe {
+        let _ = CloseHandle(process.hThread);
+    }
+    Ok(ManagedProcess::Windows(WindowsProcess {
+        pid: process.dwProcessId,
+        handle: process.hProcess,
+    }))
 }
 
 async fn wait_until_ready(
@@ -92,7 +177,10 @@ async fn wait_until_ready(
 ) -> Result<ManagedProcess> {
     for _ in 0..200 {
         let running = match &mut process {
+            #[cfg(not(windows))]
             ManagedProcess::Child(child) => child.try_wait()?.is_none(),
+            #[cfg(windows)]
+            ManagedProcess::Windows(process) => !windows_process_exited(process)?,
             #[cfg(target_os = "macos")]
             ManagedProcess::Elevated { pid } => elevated_process_matches(paths, *pid).await,
         };
@@ -128,12 +216,8 @@ async fn process_error(paths: &AppPaths) -> String {
 
 pub async fn stop_sing_box(paths: &AppPaths, process: Option<ManagedProcess>) -> Result<()> {
     match process {
+        #[cfg(not(windows))]
         Some(ManagedProcess::Child(mut child)) => {
-            #[cfg(windows)]
-            if let Some(pid) = child.id() {
-                send_windows_interrupt(pid);
-            }
-            #[cfg(not(windows))]
             let _ = child.start_kill();
 
             if tokio::time::timeout(Duration::from_secs(3), child.wait())
@@ -145,10 +229,48 @@ pub async fn stop_sing_box(paths: &AppPaths, process: Option<ManagedProcess>) ->
             }
             Ok(())
         }
+        #[cfg(windows)]
+        Some(ManagedProcess::Windows(process)) => {
+            send_windows_interrupt(process.pid);
+            for _ in 0..30 {
+                if windows_process_exited(&process)? {
+                    return Ok(());
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            windows_terminate_process(&process)?;
+            for _ in 0..30 {
+                if windows_process_exited(&process)? {
+                    return Ok(());
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(anyhow!("sing-box did not exit after termination"))
+        }
         #[cfg(target_os = "macos")]
         Some(ManagedProcess::Elevated { pid }) => stop_elevated(paths, pid).await,
         None => stop_stale_elevated(paths).await,
     }
+}
+
+pub fn process_exited(process: &mut ManagedProcess) -> Result<bool> {
+    match process {
+        #[cfg(not(windows))]
+        ManagedProcess::Child(child) => Ok(child.try_wait()?.is_some()),
+        #[cfg(windows)]
+        ManagedProcess::Windows(process) => windows_process_exited(process),
+        #[cfg(target_os = "macos")]
+        ManagedProcess::Elevated { .. } => Ok(false),
+    }
+}
+
+pub async fn socks_port_ready(port: u16) -> bool {
+    tokio::time::timeout(
+        Duration::from_millis(500),
+        TcpStream::connect(("127.0.0.1", port)),
+    )
+    .await
+    .is_ok_and(|result| result.is_ok())
 }
 
 #[cfg(target_os = "macos")]
@@ -270,41 +392,26 @@ fn hide_console(command: &mut Command) {
 fn hide_console(_: &mut Command) {}
 
 #[cfg(windows)]
-fn configure_managed_process(command: &mut Command) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-    command
-        .as_std_mut()
-        .creation_flags(CREATE_NEW_CONSOLE | CREATE_NEW_PROCESS_GROUP);
-}
-
-#[cfg(not(windows))]
-fn configure_managed_process(_: &mut Command) {}
-
-#[cfg(windows)]
-fn hide_managed_process_console(child: &tokio::process::Child) {
+fn windows_process_exited(process: &WindowsProcess) -> Result<bool> {
     use windows_sys::Win32::{
-        System::Console::{AttachConsole, FreeConsole, GetConsoleWindow},
-        UI::WindowsAndMessaging::{ShowWindow, SW_HIDE},
+        Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT},
+        System::Threading::WaitForSingleObject,
     };
-
-    let Some(pid) = child.id() else { return };
-    unsafe {
-        // Release builds use the Windows GUI subsystem and therefore have no
-        // console of their own. Keep an attached development console intact.
-        if GetConsoleWindow().is_null() && AttachConsole(pid) != 0 {
-            let window = GetConsoleWindow();
-            if !window.is_null() {
-                let _ = ShowWindow(window, SW_HIDE);
-            }
-            let _ = FreeConsole();
-        }
+    match unsafe { WaitForSingleObject(process.handle, 0) } {
+        WAIT_OBJECT_0 => Ok(true),
+        WAIT_TIMEOUT => Ok(false),
+        _ => Err(std::io::Error::last_os_error()).context("failed to inspect sing-box process"),
     }
 }
 
-#[cfg(not(windows))]
-fn hide_managed_process_console(_: &tokio::process::Child) {}
+#[cfg(windows)]
+fn windows_terminate_process(process: &WindowsProcess) -> Result<()> {
+    use windows_sys::Win32::System::Threading::TerminateProcess;
+    if unsafe { TerminateProcess(process.handle, 1) } == 0 {
+        return Err(std::io::Error::last_os_error()).context("failed to terminate sing-box");
+    }
+    Ok(())
+}
 
 #[cfg(windows)]
 fn send_windows_interrupt(pid: u32) {

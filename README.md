@@ -189,6 +189,7 @@ Tauri 会生成 Windows x64 NSIS 安装包。Windows 版启动时请求 UAC 管�
 - TUN 使用 `auto_route`、`strict_route`、DNS 劫持和自动网卡识别，使 CLI 与不读取系统代理的应用也能被覆盖。
 - 自动模式由 sing-box 的中国大陆 GeoIP/Geosite 规则集分流；全局模式不加载区域规则。
 - macOS 仅在进入自动或全局模式时弹出管理员授权，应用以精确 PID 管理提升权限的 sing-box。
-- Windows 应用通过 UAC 提升权限；sing-box 控制台保持隐藏并通过控制台中断优雅退出。
+- Windows 应用通过 UAC 提升权限；sing-box 由原生 Windows 进程 API 直接以隐藏控制台启动，并通过控制台中断优雅退出，不显示命令行黑框。
+- 应用每两秒检查 sing-box 进程及本地 SOCKS5 端口；活动模式下异常退出或端口失效时自动重启，连续失败时按最长 30 秒退避重试。
 - 本地端口是用户配置的固定端口；端口被占用时提示错误，不自动切换到其他端口。
 - PAC、gfwList、`networksetup`、PowerShell WinINET 脚本和系统 SOCKS 设置均不再使用。
