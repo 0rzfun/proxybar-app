@@ -191,7 +191,17 @@ pub enum ManagedProcess {
     #[cfg(windows)]
     Windows(WindowsProcess),
     #[cfg(target_os = "macos")]
-    Elevated { pid: u32 },
+    Elevated {
+        pid: u32,
+        dns_override: Option<MacosDnsOverride>,
+    },
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MacosDnsOverride {
+    pub service: String,
+    pub original_servers: Vec<String>,
 }
 
 pub struct Runtime {

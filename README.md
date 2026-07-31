@@ -188,9 +188,9 @@ Tauri 会生成 Windows x64 NSIS 安装包。Windows 版启动时请求 UAC 管�
 - sing-box 始终提供监听 `127.0.0.1` 的 SOCKS5 inbound；只有自动和全局模式额外创建 TUN。
 - TUN 使用 `auto_route`、`strict_route`、DNS 劫持和自动网卡识别，使 CLI 与不读取系统代理的应用也能被覆盖。
 - 自动模式由 sing-box 的中国大陆 GeoIP/Geosite 规则集分流；全局模式不加载区域规则。
-- DNS 与流量路由共用同一份策略：判定为代理的域名通过当前节点查询 Google DNS `8.8.8.8:853`（DoT），判定为直连的域名使用当前系统 DNS。macOS 会把系统 DNS 服务器的精确路由加入 TUN，防止局域网 DNS 绕过策略造成污染；sing-box 自身的直连拨号由自动网卡识别排除在 TUN 外。
+- DNS 与流量路由共用同一份策略：判定为代理的域名通过当前节点查询 Google DNS `8.8.8.8:853`（DoT），判定为直连的域名使用进入 TUN 前捕获的系统 DNS。macOS 进入 TUN 模式后会把当前活动网络服务的 DNS 临时指向 TUN 网关，使系统解析请求进入 sing-box 并命中 `hijack-dns`；停止或恢复错误状态时先还原原 DNS，再关闭 TUN。sing-box 自身的直连拨号由自动网卡识别排除在 TUN 外。
 - macOS 仅在进入自动或全局模式时弹出管理员授权，应用以精确 PID 管理提升权限的 sing-box。
 - Windows 应用通过 UAC 提升权限；sing-box 由原生 Windows 进程 API 直接以隐藏控制台启动，并通过控制台中断优雅退出，不显示命令行黑框。
 - 应用每两秒检查 sing-box 进程及本地 SOCKS5 端口；活动模式下异常退出或端口失效时自动重启，连续失败时按最长 30 秒退避重试。
 - 本地端口是用户配置的固定端口；端口被占用时提示错误，不自动切换到其他端口。
-- PAC、gfwList、`networksetup`、PowerShell WinINET 脚本和系统 SOCKS 设置均不再使用。
+- PAC、gfwList、PowerShell WinINET 脚本和系统 SOCKS 设置均不再使用。`networksetup` 仅用于 macOS TUN 模式的系统 DNS 接管与精确恢复，不修改系统代理。

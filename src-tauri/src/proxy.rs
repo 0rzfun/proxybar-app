@@ -1,3 +1,5 @@
+#[cfg(target_os = "macos")]
+use crate::model::MacosDnsOverride;
 #[cfg(windows)]
 use crate::model::WindowsProcess;
 use crate::model::{AppPaths, ManagedProcess, Node, ProxyMode};
@@ -7,6 +9,9 @@ use tokio::{
     net::{TcpListener, TcpStream},
     process::Command,
 };
+
+#[cfg(target_os = "macos")]
+const TUN_DNS_GATEWAY: &str = "172.19.0.2";
 
 pub async fn available_port(port: u16) -> Result<u16> {
     if TcpListener::bind(("127.0.0.1", port)).await.is_ok() {
@@ -23,6 +28,12 @@ pub async fn start_sing_box(
     mode: ProxyMode,
 ) -> Result<ManagedProcess> {
     let system_dns_servers = system_dns_servers(mode).await;
+    #[cfg(target_os = "macos")]
+    let dns_override = if mode.uses_tun() {
+        Some(capture_macos_dns_override().await?.0)
+    } else {
+        None
+    };
     let config = serde_json::to_vec_pretty(&crate::sing_box::config(
         node,
         port,
@@ -43,7 +54,24 @@ pub async fn start_sing_box(
     #[cfg(not(target_os = "macos"))]
     let process = start_child(paths)?;
 
-    wait_until_ready(paths, process, port).await
+    let mut process = wait_until_ready(paths, process, port).await?;
+
+    #[cfg(target_os = "macos")]
+    if let Some(dns_override) = dns_override {
+        if let Err(error) = apply_macos_dns_override(&dns_override).await {
+            let _ = stop_sing_box(paths, Some(process)).await;
+            return Err(error);
+        }
+        if let ManagedProcess::Elevated {
+            dns_override: process_override,
+            ..
+        } = &mut process
+        {
+            *process_override = Some(dns_override);
+        }
+    }
+
+    Ok(process)
 }
 
 #[cfg(target_os = "macos")]
@@ -77,6 +105,7 @@ fn parse_macos_dns_servers(output: &str) -> Vec<String> {
         .filter_map(|line| line.split_once(" : ").map(|(_, address)| address.trim()))
         .filter_map(|address| address.split('%').next())
         .filter_map(|address| address.parse::<IpAddr>().ok())
+        .filter(|address| address.to_string() != TUN_DNS_GATEWAY)
         .filter(|address| match address {
             IpAddr::V4(address) => {
                 !address.is_unspecified() && !address.is_loopback() && !address.is_multicast()
@@ -91,6 +120,129 @@ fn parse_macos_dns_servers(output: &str) -> Vec<String> {
         .map(|address| address.to_string())
         .filter(|address| seen.insert(address.clone()))
         .collect()
+}
+
+#[cfg(target_os = "macos")]
+async fn capture_macos_dns_override() -> Result<(MacosDnsOverride, bool)> {
+    let route = Command::new("/sbin/route")
+        .args(["-n", "get", "default"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .context("failed to inspect the macOS default route")?;
+    if !route.status.success() {
+        return Err(anyhow!("macOS default route is unavailable"));
+    }
+    let interface = parse_macos_default_interface(&String::from_utf8_lossy(&route.stdout))
+        .ok_or_else(|| anyhow!("macOS default route has no interface"))?;
+
+    let services = Command::new("/usr/sbin/networksetup")
+        .arg("-listnetworkserviceorder")
+        .stdin(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .context("failed to list macOS network services")?;
+    if !services.status.success() {
+        return Err(anyhow!("macOS network services are unavailable"));
+    }
+    let service =
+        parse_macos_network_service(&String::from_utf8_lossy(&services.stdout), &interface)
+            .ok_or_else(|| anyhow!("no macOS network service uses interface {interface}"))?;
+
+    let configured = Command::new("/usr/sbin/networksetup")
+        .args(["-getdnsservers", &service])
+        .stdin(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .with_context(|| format!("failed to read DNS servers for {service}"))?;
+    if !configured.status.success() {
+        return Err(anyhow!("failed to read DNS servers for {service}"));
+    }
+    let configured = String::from_utf8_lossy(&configured.stdout);
+    let had_tun_gateway = configured
+        .lines()
+        .any(|line| line.trim() == TUN_DNS_GATEWAY);
+    Ok((
+        MacosDnsOverride {
+            service,
+            original_servers: parse_macos_configured_dns(&configured),
+        },
+        had_tun_gateway,
+    ))
+}
+
+#[cfg(target_os = "macos")]
+fn parse_macos_default_interface(output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("interface:")
+            .map(str::trim)
+            .filter(|interface| !interface.is_empty())
+            .map(str::to_owned)
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn parse_macos_network_service(output: &str, interface: &str) -> Option<String> {
+    let mut service = None;
+    for line in output.lines().map(str::trim) {
+        if line.starts_with('(') {
+            if let Some((_, name)) = line.split_once(") ") {
+                service = Some(name.trim_start_matches('*').trim().to_owned());
+                continue;
+            }
+        }
+        if line.contains(&format!("Device: {interface})")) {
+            return service.filter(|service| !service.is_empty());
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn parse_macos_configured_dns(output: &str) -> Vec<String> {
+    use std::net::IpAddr;
+
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.parse::<IpAddr>().is_ok())
+        .filter(|line| *line != TUN_DNS_GATEWAY)
+        .map(str::to_owned)
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+async fn apply_macos_dns_override(dns_override: &MacosDnsOverride) -> Result<()> {
+    let command = format!(
+        "/usr/sbin/networksetup -setdnsservers {} {} && {{ /usr/bin/dscacheutil -flushcache; /usr/bin/killall -HUP mDNSResponder 2>/dev/null || true; }}",
+        shell_quote(&dns_override.service),
+        shell_quote(TUN_DNS_GATEWAY),
+    );
+    run_as_administrator(&command)
+        .await
+        .with_context(|| format!("failed to route macOS DNS through {}", dns_override.service))
+}
+
+#[cfg(target_os = "macos")]
+fn restore_macos_dns_command(dns_override: &MacosDnsOverride) -> String {
+    let servers = if dns_override.original_servers.is_empty() {
+        "empty".to_owned()
+    } else {
+        dns_override
+            .original_servers
+            .iter()
+            .map(|server| shell_quote(server))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    format!(
+        "/usr/sbin/networksetup -setdnsservers {} {servers} && {{ /usr/bin/dscacheutil -flushcache; /usr/bin/killall -HUP mDNSResponder 2>/dev/null || true; }}",
+        shell_quote(&dns_override.service),
+    )
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -236,7 +388,7 @@ async fn wait_until_ready(
             #[cfg(windows)]
             ManagedProcess::Windows(process) => !windows_process_exited(process)?,
             #[cfg(target_os = "macos")]
-            ManagedProcess::Elevated { pid } => elevated_process_matches(paths, *pid).await,
+            ManagedProcess::Elevated { pid, .. } => elevated_process_matches(paths, *pid).await,
         };
         if !running {
             let message = process_error(paths).await;
@@ -302,7 +454,9 @@ pub async fn stop_sing_box(paths: &AppPaths, process: Option<ManagedProcess>) ->
             Err(anyhow!("sing-box did not exit after termination"))
         }
         #[cfg(target_os = "macos")]
-        Some(ManagedProcess::Elevated { pid }) => stop_elevated(paths, pid).await,
+        Some(ManagedProcess::Elevated { pid, dns_override }) => {
+            stop_elevated(paths, pid, dns_override.as_ref()).await
+        }
         None => stop_stale_elevated(paths).await,
     }
 }
@@ -341,7 +495,10 @@ async fn start_elevated(paths: &AppPaths) -> Result<ManagedProcess> {
     for _ in 0..30 {
         if let Ok(contents) = tokio::fs::read_to_string(&paths.sing_box_pid).await {
             if let Ok(pid) = contents.trim().parse::<u32>() {
-                return Ok(ManagedProcess::Elevated { pid });
+                return Ok(ManagedProcess::Elevated {
+                    pid,
+                    dns_override: None,
+                });
             }
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -353,14 +510,24 @@ async fn start_elevated(paths: &AppPaths) -> Result<ManagedProcess> {
 
 #[cfg(target_os = "macos")]
 async fn stop_stale_elevated(paths: &AppPaths) -> Result<()> {
-    let Ok(contents) = tokio::fs::read_to_string(&paths.sing_box_pid).await else {
-        return Ok(());
+    let stale_dns = match capture_macos_dns_override().await {
+        Ok((dns_override, true)) => Some(dns_override),
+        _ => None,
     };
-    let Ok(pid) = contents.trim().parse::<u32>() else {
-        let _ = tokio::fs::remove_file(&paths.sing_box_pid).await;
-        return Ok(());
-    };
-    stop_elevated(paths, pid).await
+    let pid = tokio::fs::read_to_string(&paths.sing_box_pid)
+        .await
+        .ok()
+        .and_then(|contents| contents.trim().parse::<u32>().ok());
+    match pid {
+        Some(pid) => stop_elevated(paths, pid, stale_dns.as_ref()).await,
+        None => {
+            let _ = tokio::fs::remove_file(&paths.sing_box_pid).await;
+            if let Some(dns_override) = stale_dns {
+                run_as_administrator(&restore_macos_dns_command(&dns_override)).await?;
+            }
+            Ok(())
+        }
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -369,15 +536,33 @@ async fn stop_stale_elevated(_paths: &AppPaths) -> Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-async fn stop_elevated(paths: &AppPaths, pid: u32) -> Result<()> {
-    if elevated_process_matches(paths, pid).await {
-        let command = format!(
-            "/bin/kill -TERM {pid}; i=0; while /bin/kill -0 {pid} 2>/dev/null && [ $i -lt 30 ]; do /bin/sleep 0.1; i=$((i+1)); done; if /bin/kill -0 {pid} 2>/dev/null; then /bin/kill -KILL {pid}; fi"
-        );
-        run_as_administrator(&command).await?;
+async fn stop_elevated(
+    paths: &AppPaths,
+    pid: u32,
+    dns_override: Option<&MacosDnsOverride>,
+) -> Result<()> {
+    let process_matches = elevated_process_matches(paths, pid).await;
+    let mut command = if let Some(dns_override) = dns_override {
+        format!(
+            "{}; restore_status=$?",
+            restore_macos_dns_command(dns_override)
+        )
+    } else {
+        "restore_status=0".to_owned()
+    };
+    if process_matches {
+        command.push_str(&format!(
+            "; /bin/kill -TERM {pid}; i=0; while /bin/kill -0 {pid} 2>/dev/null && [ $i -lt 30 ]; do /bin/sleep 0.1; i=$((i+1)); done; if /bin/kill -0 {pid} 2>/dev/null; then /bin/kill -KILL {pid}; fi"
+        ));
     }
+    command.push_str("; exit $restore_status");
+    let result = if dns_override.is_some() || process_matches {
+        run_as_administrator(&command).await
+    } else {
+        Ok(())
+    };
     let _ = tokio::fs::remove_file(&paths.sing_box_pid).await;
-    Ok(())
+    result
 }
 
 #[cfg(target_os = "macos")]
@@ -487,7 +672,11 @@ fn send_windows_interrupt(pid: u32) {
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
-    use super::{elevated_launch_command, parse_macos_dns_servers};
+    use super::{
+        elevated_launch_command, parse_macos_configured_dns, parse_macos_default_interface,
+        parse_macos_dns_servers, parse_macos_network_service, restore_macos_dns_command,
+    };
+    use crate::model::MacosDnsOverride;
 
     #[test]
     fn extracts_unique_routable_macos_dns_servers() {
@@ -505,6 +694,41 @@ resolver #2
             parse_macos_dns_servers(output),
             vec!["192.168.1.111", "fd00::1"]
         );
+    }
+
+    #[test]
+    fn finds_active_macos_network_service() {
+        let route = "   route to: default\ninterface: en7\n";
+        let services = r#"
+An asterisk (*) denotes that a network service is disabled.
+(1) Wi-Fi
+(Hardware Port: Wi-Fi, Device: en0)
+(2) Renamed USB LAN
+(Hardware Port: USB 10/100/1000 LAN, Device: en7)
+"#;
+        assert_eq!(parse_macos_default_interface(route).as_deref(), Some("en7"));
+        assert_eq!(
+            parse_macos_network_service(services, "en7").as_deref(),
+            Some("Renamed USB LAN")
+        );
+    }
+
+    #[test]
+    fn stale_tun_gateway_is_not_captured_as_original_dns() {
+        assert_eq!(
+            parse_macos_configured_dns("172.19.0.2\n1.1.1.1\n"),
+            vec!["1.1.1.1"]
+        );
+    }
+
+    #[test]
+    fn restores_dhcp_dns_before_tun_shutdown() {
+        let command = restore_macos_dns_command(&MacosDnsOverride {
+            service: "Home Wi-Fi".into(),
+            original_servers: Vec::new(),
+        });
+        assert!(command.starts_with("/usr/sbin/networksetup -setdnsservers 'Home Wi-Fi' empty"));
+        assert!(command.contains("dscacheutil -flushcache"));
     }
 
     #[test]

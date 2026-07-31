@@ -88,7 +88,7 @@ pub fn config(
         "listen_port": listen_port
     })];
     if mode.uses_tun() {
-        let mut tun = json!({
+        inbounds.push(json!({
             "type": "tun",
             "tag": "tun-in",
             "address": ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
@@ -96,22 +96,7 @@ pub fn config(
             "auto_route": true,
             "strict_route": true,
             "stack": "mixed"
-        });
-        if !system_dns_servers.is_empty() {
-            let mut route_addresses = vec![
-                "0.0.0.0/1".to_owned(),
-                "128.0.0.0/1".to_owned(),
-                "::/1".to_owned(),
-                "8000::/1".to_owned(),
-            ];
-            route_addresses.extend(system_dns_servers.iter().filter_map(|server| {
-                server.parse::<std::net::IpAddr>().ok().map(|address| {
-                    format!("{address}/{}", if address.is_ipv4() { 32 } else { 128 })
-                })
-            }));
-            tun["route_address"] = json!(route_addresses);
-        }
-        inbounds.push(tun);
+        }));
     }
 
     let mut vless = Map::from_iter([
@@ -355,7 +340,7 @@ mod tests {
     }
 
     #[test]
-    fn tun_routes_capture_system_dns_without_replacing_default_routes() {
+    fn tun_keeps_default_routes_and_uses_captured_system_dns() {
         let value = config(
             &test_node(),
             10_850,
@@ -363,17 +348,7 @@ mod tests {
             Path::new("cache.db"),
             &["192.168.1.1".into(), "fd00::1".into()],
         );
-        assert_eq!(
-            value["inbounds"][1]["route_address"],
-            json!([
-                "0.0.0.0/1",
-                "128.0.0.0/1",
-                "::/1",
-                "8000::/1",
-                "192.168.1.1/32",
-                "fd00::1/128"
-            ])
-        );
+        assert!(value["inbounds"][1].get("route_address").is_none());
         assert_eq!(value["dns"]["servers"][0]["server"], "192.168.1.1");
         assert!(value["dns"]["servers"][0].get("detour").is_none());
     }
