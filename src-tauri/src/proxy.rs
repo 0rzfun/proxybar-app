@@ -22,11 +22,13 @@ pub async fn start_sing_box(
     port: u16,
     mode: ProxyMode,
 ) -> Result<ManagedProcess> {
+    let system_dns_servers = system_dns_servers(mode).await;
     let config = serde_json::to_vec_pretty(&crate::sing_box::config(
         node,
         port,
         mode,
         &paths.sing_box_cache,
+        &system_dns_servers,
     ))?;
     tokio::fs::write(&paths.sing_box_config, config).await?;
     validate_config(paths).await?;
@@ -42,6 +44,58 @@ pub async fn start_sing_box(
     let process = start_child(paths)?;
 
     wait_until_ready(paths, process, port).await
+}
+
+#[cfg(target_os = "macos")]
+async fn system_dns_servers(mode: ProxyMode) -> Vec<String> {
+    if !mode.uses_tun() {
+        return Vec::new();
+    }
+    let Ok(output) = Command::new("/usr/sbin/scutil")
+        .arg("--dns")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .await
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    parse_macos_dns_servers(&String::from_utf8_lossy(&output.stdout))
+}
+
+#[cfg(target_os = "macos")]
+fn parse_macos_dns_servers(output: &str) -> Vec<String> {
+    use std::{collections::HashSet, net::IpAddr};
+
+    let mut seen = HashSet::new();
+    output
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("nameserver["))
+        .filter_map(|line| line.split_once(" : ").map(|(_, address)| address.trim()))
+        .filter_map(|address| address.split('%').next())
+        .filter_map(|address| address.parse::<IpAddr>().ok())
+        .filter(|address| match address {
+            IpAddr::V4(address) => {
+                !address.is_unspecified() && !address.is_loopback() && !address.is_multicast()
+            }
+            IpAddr::V6(address) => {
+                !address.is_unspecified()
+                    && !address.is_loopback()
+                    && !address.is_multicast()
+                    && !address.is_unicast_link_local()
+            }
+        })
+        .map(|address| address.to_string())
+        .filter(|address| seen.insert(address.clone()))
+        .collect()
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn system_dns_servers(_mode: ProxyMode) -> Vec<String> {
+    Vec::new()
 }
 
 async fn validate_config(paths: &AppPaths) -> Result<()> {
@@ -433,7 +487,25 @@ fn send_windows_interrupt(pid: u32) {
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
-    use super::elevated_launch_command;
+    use super::{elevated_launch_command, parse_macos_dns_servers};
+
+    #[test]
+    fn extracts_unique_routable_macos_dns_servers() {
+        let output = r#"
+resolver #1
+  nameserver[0] : 192.168.1.111
+  nameserver[1] : fd00::1
+resolver #2
+  nameserver[0] : 192.168.1.111
+  nameserver[1] : fe80::1%en0
+  nameserver[2] : 127.0.0.1
+  nameserver[3] : invalid
+"#;
+        assert_eq!(
+            parse_macos_dns_servers(output),
+            vec!["192.168.1.111", "fd00::1"]
+        );
+    }
 
     #[test]
     fn elevated_launch_detaches_without_macos_nohup() {

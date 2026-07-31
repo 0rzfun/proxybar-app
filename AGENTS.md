@@ -148,6 +148,7 @@ assets/
 - TUN inbound、自动路由、DNS 劫持、GeoIP/Geosite 下载和缓存都由 sing-box 完成。
 - Rust 不生成 PAC，不修改系统 SOCKS/PAC 设置，也不自行下载或解析 gfwList。
 - 自动模式使用 sing-box 官方中国大陆 GeoIP/Geosite 二进制规则集：中国大陆和私网直连，其余代理。
+- DNS 服务器选择必须由流量路由策略生成，不能维护另一份域名分类：代理域名通过当前节点查询 `8.8.8.8:853`（DoT），直连域名使用当前系统 DNS。macOS 必须把当前系统 DNS 的精确地址加入 TUN 路由，避免局域网 DNS 绕过劫持；不要把本地 DNS `detour` 到空配置的直连出站，sing-box 自身拨号应依靠自动网卡识别绕过 TUN。
 - 全局模式除防止路由环路所需的直连及私网外，其余流量均代理。
 - `route.auto_detect_interface` 必须保持启用，避免代理服务器连接再次进入 TUN。
 - 修改 `sing_box.rs` 路由行为时必须补充配置单元测试，并用捆绑的 sing-box 执行 `check`。
