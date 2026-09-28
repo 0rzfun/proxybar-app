@@ -186,6 +186,7 @@ release/windows/ProxyBar-Setup.exe
 
 - 不要直接修改 `release/` 内文件；始终通过构建脚本重新生成。
 - `npm run mac` 只能在 macOS 上执行。一次 Universal 构建应生成 Intel、Apple Silicon 和 Universal 2 三个应用包，不要重复执行三次完整编译。
+- 仅需 Apple Silicon 验证时可运行 `npm run mac:arm64`，只生成 `ProxyBar-Apple-Silicon.app`。
 - 仅需本机 Intel 验证时可运行 `npm run mac:x64`，只生成 `ProxyBar-Intel.app`。
 - `npm run windows` 只能在 Windows x64 + MSVC + NSIS 环境执行。
 - `dev`、`check`、`test` 和平台构建会自动下载当前主机/目标所需的 sing-box；可用 `SING_BOX_DOWNLOAD_PROXY` 指定下载代理。

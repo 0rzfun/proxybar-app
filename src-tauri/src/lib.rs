@@ -136,7 +136,7 @@ async fn save_settings(
             if port_changed && mode != ProxyMode::Off {
                 if let Err(error) = switch_mode(&handle, mode).await {
                     recover_off(&handle).await;
-                    set_status(&handle, error.to_string()).await;
+                    set_status(&handle, format!("{error:#}")).await;
                     return;
                 }
             }
@@ -237,14 +237,14 @@ pub fn run() {
                 tauri::async_runtime::spawn(async move {
                     if let Err(error) = switch_mode(&handle, startup_mode).await {
                         recover_off(&handle).await;
-                        set_status(&handle, error.to_string()).await;
+                        set_status(&handle, format!("{error:#}")).await;
                     }
                 });
             } else {
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     if let Err(error) = switch_mode(&handle, ProxyMode::Off).await {
-                        set_status(&handle, error.to_string()).await;
+                        set_status(&handle, format!("{error:#}")).await;
                     }
                 });
             }
@@ -286,11 +286,14 @@ fn create_tray(
 
 fn handle_menu(app: AppHandle, id: String) {
     if let Some(mode) = id.strip_prefix("mode.").and_then(parse_mode) {
-        let _ = set_mode_checkmarks(&app, mode);
+        let checkmarks = set_mode_checkmarks(&app, mode);
         tauri::async_runtime::spawn(async move {
+            if let Err(error) = checkmarks {
+                set_status(&app, format!("{error:#}")).await;
+            }
             if let Err(error) = switch_mode(&app, mode).await {
                 recover_off(&app).await;
-                set_status(&app, error.to_string()).await;
+                set_status(&app, format!("{error:#}")).await;
             }
         });
     } else if let Some(index) = id
@@ -321,7 +324,8 @@ fn set_mode_checkmarks(app: &AppHandle, selected: ProxyMode) -> Result<()> {
     let items = state
         .mode_items
         .lock()
-        .map_err(|_| anyhow!("代理模式菜单状态不可用"))?;
+        .map_err(|_| anyhow!("代理模式菜单状态不可用"))?
+        .clone();
     for (mode, item) in items.iter() {
         item.set_checked(*mode == selected)?;
     }
@@ -433,10 +437,21 @@ fn tray_menu(
     )?;
     let separator = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "app.quit", texts.get("quit"), true, None::<&str>)?;
-    Ok((
-        Menu::with_items(app, &[&modes, &nodes, &settings, &separator, &quit])?,
-        mode_items,
-    ))
+    let menu = Menu::with_items(app, &[&modes, &nodes, &settings])?;
+    if !runtime.status.is_empty() {
+        let status = Submenu::with_id(app, "status", texts.get("status"), true)?;
+        for line in runtime
+            .status
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+        {
+            status.append(&MenuItem::new(app, line, false, None::<&str>)?)?;
+        }
+        menu.append(&status)?;
+    }
+    menu.append(&separator)?;
+    menu.append(&quit)?;
+    Ok((menu, mode_items))
 }
 
 fn tooltip(runtime: &Runtime, texts: &Texts) -> String {
@@ -450,7 +465,7 @@ fn tooltip(runtime: &Runtime, texts: &Texts) -> String {
         Some(node) => format!("ProxyBar — {mode} — {}", node.name),
         None => format!("ProxyBar — {mode}"),
     };
-    if runtime.restart_pending && !runtime.status.is_empty() {
+    if !runtime.status.is_empty() {
         format!("{base} — {}", runtime.status)
     } else {
         base
@@ -760,7 +775,7 @@ async fn select_node(app: &AppHandle, index: usize) {
         let _ = rebuild_tray(app).await;
     } else if let Err(error) = switch_mode(app, mode).await {
         recover_off(app).await;
-        set_status(app, error.to_string()).await;
+        set_status(app, format!("{error:#}")).await;
     }
 }
 
@@ -783,7 +798,7 @@ async fn recover_off(app: &AppHandle) {
 fn spawn_refresh_subscription(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         if let Err(error) = refresh_subscription(&app).await {
-            set_status(&app, error.to_string()).await;
+            set_status(&app, format!("{error:#}")).await;
         }
     });
 }
@@ -843,6 +858,16 @@ async fn refresh_subscription(app: &AppHandle) -> Result<()> {
 
 async fn set_status(app: &AppHandle, status: String) {
     let state = app.state::<AppState>();
+    eprintln!("{status}");
+    use tokio::io::AsyncWriteExt;
+    if let Ok(mut log) = tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(state.paths.data_dir.join("proxybar.log"))
+        .await
+    {
+        let _ = log.write_all(format!("{status}\n").as_bytes()).await;
+    }
     state.inner.lock().await.status = status;
     let _ = rebuild_tray(app).await;
 }
@@ -974,6 +999,24 @@ mod tests {
     };
     use crate::model::ProxyMode;
     use std::time::Duration;
+
+    #[test]
+    fn failed_switch_remains_visible_after_recovery_to_off() {
+        let texts = crate::localization::Texts::load(std::path::Path::new("/nonexistent/locales"));
+        let mut runtime = crate::model::Runtime {
+            settings: crate::model::Settings::default(),
+            nodes: Vec::new(),
+            process: None,
+            port: 10850,
+            subscription_loading: false,
+            status: "administrator helper disconnected".into(),
+            restart_pending: false,
+            restart_attempts: 0,
+        };
+        assert!(super::tooltip(&runtime, &texts).contains(&runtime.status));
+        runtime.status.clear();
+        assert!(!super::tooltip(&runtime, &texts).contains("disconnected"));
+    }
 
     #[test]
     fn empty_subscription_url_is_valid() {

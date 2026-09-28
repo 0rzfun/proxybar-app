@@ -112,6 +112,7 @@ fn defaults() -> HashMap<String, String> {
         ("nodes", "Nodes"),
         ("refresh_subscription", "Refresh Subscription"),
         ("settings", "Settings"),
+        ("status", "Status / Error Details"),
         ("loading_nodes", "Loading nodes…"),
         ("no_nodes", "No nodes; refresh subscription"),
         ("quit", "Quit"),

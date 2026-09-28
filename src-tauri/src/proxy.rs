@@ -222,9 +222,13 @@ async fn apply_macos_dns_override(dns_override: &MacosDnsOverride) -> Result<()>
         shell_quote(&dns_override.service),
         shell_quote(TUN_DNS_GATEWAY),
     );
-    crate::privileged::execute(&command, Some(restore_macos_dns_command(dns_override)), None)
-        .await
-        .with_context(|| format!("failed to route macOS DNS through {}", dns_override.service))
+    crate::privileged::execute(
+        &command,
+        Some(restore_macos_dns_command(dns_override)),
+        None,
+    )
+    .await
+    .with_context(|| format!("failed to route macOS DNS through {}", dns_override.service))
 }
 
 #[cfg(target_os = "macos")]
@@ -547,6 +551,12 @@ async fn stop_elevated(
     dns_override: Option<&MacosDnsOverride>,
 ) -> Result<()> {
     let process_matches = elevated_process_matches(paths, pid).await;
+    // A stale PID is not a managed process. Removing its record must not contact
+    // an unavailable helper or clear cleanup registered for another process.
+    if !needs_elevated_cleanup(process_matches, dns_override.is_some()) {
+        let _ = tokio::fs::remove_file(&paths.sing_box_pid).await;
+        return Ok(());
+    }
     let mut command = if let Some(dns_override) = dns_override {
         format!(
             "{}; restore_status=$?",
@@ -561,16 +571,17 @@ async fn stop_elevated(
         ));
     }
     command.push_str("; exit $restore_status");
-    let result = if dns_override.is_some() || process_matches {
-        run_as_administrator(&command).await
-    } else {
-        Ok(())
-    };
+    let result = run_as_administrator(&command).await;
     if result.is_ok() {
         crate::privileged::clear_cleanup().await?;
         let _ = tokio::fs::remove_file(&paths.sing_box_pid).await;
     }
     result
+}
+
+#[cfg(target_os = "macos")]
+fn needs_elevated_cleanup(process_matches: bool, has_dns_override: bool) -> bool {
+    process_matches || has_dns_override
 }
 
 #[cfg(target_os = "macos")]
@@ -662,10 +673,19 @@ fn send_windows_interrupt(pid: u32) {
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::{
-        elevated_launch_command, parse_macos_configured_dns, parse_macos_default_interface,
-        parse_macos_dns_servers, parse_macos_network_service, restore_macos_dns_command,
+        elevated_launch_command, needs_elevated_cleanup, parse_macos_configured_dns,
+        parse_macos_default_interface, parse_macos_dns_servers, parse_macos_network_service,
+        restore_macos_dns_command,
     };
     use crate::model::MacosDnsOverride;
+
+    #[test]
+    fn stale_pid_without_dns_does_not_require_administrator_connection() {
+        assert!(!needs_elevated_cleanup(false, false));
+        assert!(needs_elevated_cleanup(true, false));
+        assert!(needs_elevated_cleanup(false, true));
+        assert!(needs_elevated_cleanup(true, true));
+    }
 
     #[test]
     fn extracts_unique_routable_macos_dns_servers() {

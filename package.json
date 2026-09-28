@@ -8,6 +8,7 @@
     "dev": "node scripts/fetch-sing-box.mjs host && tauri dev",
     "build:web": "tsc --noEmit && vite build",
     "mac": "node scripts/build.mjs macos",
+    "mac:arm64": "node scripts/build.mjs macos-arm64",
     "mac:x64": "node scripts/build.mjs macos-x64",
     "windows": "node scripts/build.mjs windows",
     "check": "node scripts/fetch-sing-box.mjs host && npm run build:web && cargo fmt --manifest-path src-tauri/Cargo.toml --check && cargo check --manifest-path src-tauri/Cargo.toml",

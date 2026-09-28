@@ -118,9 +118,7 @@ fn connect() -> Result<Connection> {
         loop {
             match listener.accept() {
                 Ok((stream, _)) if peer_pid(&stream)? == expected && peer_is_root(&stream) => {
-                    stream.set_read_timeout(Some(Duration::from_secs(45)))?;
-                    stream.set_write_timeout(Some(Duration::from_secs(45)))?;
-                    return Ok(BufReader::new(stream));
+                    return blocking_connection(stream);
                 }
                 Ok(_) if Instant::now() < deadline => continue,
                 Ok(_) => return Err(anyhow!("administrator connection timed out")),
@@ -138,7 +136,20 @@ fn connect() -> Result<Connection> {
     result
 }
 
-pub async fn execute(command: &str, cleanup: Option<String>, pid_file: Option<String>) -> Result<()> {
+fn blocking_connection(stream: UnixStream) -> Result<Connection> {
+    // macOS accept() inherits O_NONBLOCK from the listening socket. Requests run
+    // on spawn_blocking and must wait for the worker instead of failing with EAGAIN.
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(Duration::from_secs(45)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(45)))?;
+    Ok(BufReader::new(stream))
+}
+
+pub async fn execute(
+    command: &str,
+    cleanup: Option<String>,
+    pid_file: Option<String>,
+) -> Result<()> {
     send(Request {
         command: command.to_owned(),
         cleanup,
@@ -275,6 +286,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn accepted_connection_waits_for_delayed_worker_reply() {
+        let directory =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.build/helper-tests");
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(format!("socket-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let peer = UnixStream::connect(&path).unwrap();
+        let (accepted, _) = listener.accept().unwrap();
+        let worker = std::thread::spawn(move || {
+            let mut peer = BufReader::new(peer);
+            let mut request = String::new();
+            peer.read_line(&mut request).unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+            peer.get_mut().write_all(b"null\n").unwrap();
+        });
+        let mut connection = blocking_connection(accepted).unwrap();
+        assert_eq!(
+            exchange(
+                &mut connection,
+                &Request {
+                    command: "true".into(),
+                    cleanup: None,
+                    pid_file: None,
+                    clear: false,
+                }
+            )
+            .unwrap(),
+            None
+        );
+        worker.join().unwrap();
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn reuses_one_connection_after_command_failure() {
         let (client, server) = UnixStream::pair().unwrap();
         let worker = std::thread::spawn(move || serve(server));
@@ -314,8 +361,8 @@ mod tests {
 
     #[test]
     fn disconnect_restores_dns_before_stopping_process_and_forgets_old_cleanup() {
-        let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../.build/helper-tests");
+        let directory =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.build/helper-tests");
         std::fs::create_dir_all(&directory).unwrap();
         let path = directory.join(format!("cleanup-{}.txt", std::process::id()));
         let _ = std::fs::remove_file(&path);

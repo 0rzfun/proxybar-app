@@ -82,6 +82,8 @@ release/
 
 旧版 `settings.conf` 会自动迁移；新版设置写入 `settings.json`。
 
+模式切换等操作失败时，托盘的“状态 / 错误详情”和 tooltip 会显示错误，完整错误同时写入数据目录的 `proxybar.log`。
+
 主要运行文件包括订阅缓存、生成的 sing-box 配置、规则缓存、日志和 macOS 管理员进程 PID，它们都保存在用户数据目录，不会写入应用安装目录。
 
 ## 开发环境
@@ -136,6 +138,8 @@ ProxyBar-Windows-x64.zip
 ```bash
 npm run mac
 ```
+
+只构建 Apple Silicon 包时运行 `npm run mac:arm64`，产物为 `release/macos/ProxyBar-Apple-Silicon.app`。
 
 只构建和验证 Intel 包时运行 `npm run mac:x64`；该命令不会编译 arm64 或 Universal 目标。
 
@@ -193,5 +197,6 @@ Tauri 会生成 Windows x64 NSIS 安装包。Windows 版启动时请求 UAC 管�
 - 辅助进程通过私有 Unix socket 与应用互相校验 PID，连接建立后删除 socket；不保存密码、不安装永久服务、不修改 sudoers。正常退出或应用连接断开时恢复 DNS、按精确进程身份停止 TUN 并退出；辅助进程异常失效时需重启应用，不会反复弹出密码框。
 - Windows 应用通过 UAC 提升权限；sing-box 由原生 Windows 进程 API 直接以隐藏控制台启动，并通过控制台中断优雅退出，不显示命令行黑框。
 - 应用每两秒检查 sing-box 进程及本地 SOCKS5 端口；活动模式下异常退出或端口失效时自动重启，连续失败时按最长 30 秒退避重试。
+- macOS 辅助连接在验证身份后切回阻塞读写，并保留 45 秒超时，以等待辅助进程回复。macOS 会直接移除已失效且无需恢复 DNS 的残留 PID 记录，不通过管理员辅助进程执行空清理；因此辅助连接失效不会因旧 PID 记录阻塞关闭或手动模式。
 - 本地端口是用户配置的固定端口；端口被占用时提示错误，不自动切换到其他端口。
 - PAC、gfwList、PowerShell WinINET 脚本和系统 SOCKS 设置均不再使用。`networksetup` 仅用于 macOS TUN 模式的系统 DNS 接管与精确恢复，不修改系统代理。

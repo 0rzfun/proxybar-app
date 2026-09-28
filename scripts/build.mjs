@@ -67,29 +67,32 @@ function findWebView2Loader(sourceDir) {
   return null;
 }
 
-if (platform === "macos-x64") {
+if (platform === "macos-x64" || platform === "macos-arm64") {
   if (process.platform !== "darwin") throw new Error("The macOS bundle must be built on macOS.");
-  prepareSingBox(["macos-x64"]);
-  const target = "x86_64-apple-darwin";
+  const arm64 = platform === "macos-arm64";
+  prepareSingBox([platform]);
+  const target = arm64 ? "aarch64-apple-darwin" : "x86_64-apple-darwin";
+  const architecture = arm64 ? "arm64" : "x86_64";
+  const label = arm64 ? "Apple-Silicon" : "Intel";
   run(tauri, ["build", "--target", target, "--bundles", "app"]);
 
   const source = resolve(root, ".build/target", target, "release/bundle/macos/ProxyBar.app");
   const outputDir = resolve(root, "release/macos");
-  const output = join(outputDir, "ProxyBar-Intel.app");
+  const output = join(outputDir, `ProxyBar-${label}.app`);
   if (!existsSync(source)) throw new Error(`Missing macOS bundle: ${source}`);
 
   resetDirectory(outputDir);
   cpSync(source, output, { recursive: true });
   const executable = join(output, "Contents/MacOS/proxybar");
   const bundledPlatform = join(output, "Contents/Resources/assets/platform");
-  const armBinary = join(bundledPlatform, "sing-box-aarch64");
-  if (existsSync(armBinary)) rmSync(armBinary);
-  verifyArchitectures(executable, ["x86_64"]);
-  verifyArchitectures(join(bundledPlatform, "sing-box-x86_64"), ["x86_64"]);
+  const unusedBinary = join(bundledPlatform, arm64 ? "sing-box-x86_64" : "sing-box-aarch64");
+  if (existsSync(unusedBinary)) rmSync(unusedBinary);
+  verifyArchitectures(executable, [architecture]);
+  verifyArchitectures(join(bundledPlatform, arm64 ? "sing-box-aarch64" : "sing-box-x86_64"), [architecture]);
   run("codesign", ["--force", "--deep", "--sign", "-", output]);
   run("codesign", ["--verify", "--deep", "--strict", "--verbose=2", output]);
   cleanGeneratedSchemas();
-  console.log(`macOS Intel release: ${output}`);
+  console.log(`macOS ${label} release: ${output}`);
 } else if (platform === "macos") {
   if (process.platform !== "darwin") throw new Error("The macOS bundle must be built on macOS.");
   prepareSingBox(["macos-x64", "macos-arm64"]);
@@ -181,5 +184,5 @@ if (platform === "macos-x64") {
   cleanGeneratedSchemas();
   console.log(`Windows portable release: ${outputDir}`);
 } else {
-  throw new Error("Usage: node scripts/build.mjs <macos|macos-x64|windows>");
+  throw new Error("Usage: node scripts/build.mjs <macos|macos-x64|macos-arm64|windows>");
 }
