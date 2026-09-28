@@ -37,6 +37,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Test macOS lifecycle and configuration
+        run: npm test
+
       - name: Build all macOS variants
         id: build_macos
         continue-on-error: true

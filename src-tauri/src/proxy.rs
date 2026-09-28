@@ -58,16 +58,16 @@ pub async fn start_sing_box(
 
     #[cfg(target_os = "macos")]
     if let Some(dns_override) = dns_override {
-        if let Err(error) = apply_macos_dns_override(&dns_override).await {
-            let _ = stop_sing_box(paths, Some(process)).await;
-            return Err(error);
-        }
         if let ManagedProcess::Elevated {
             dns_override: process_override,
             ..
         } = &mut process
         {
-            *process_override = Some(dns_override);
+            *process_override = Some(dns_override.clone());
+        }
+        if let Err(error) = apply_macos_dns_override(&dns_override).await {
+            let _ = stop_sing_box(paths, Some(process)).await;
+            return Err(error);
         }
     }
 
@@ -222,7 +222,7 @@ async fn apply_macos_dns_override(dns_override: &MacosDnsOverride) -> Result<()>
         shell_quote(&dns_override.service),
         shell_quote(TUN_DNS_GATEWAY),
     );
-    run_as_administrator(&command)
+    crate::privileged::execute(&command, Some(restore_macos_dns_command(dns_override)), None)
         .await
         .with_context(|| format!("failed to route macOS DNS through {}", dns_override.service))
 }
@@ -490,7 +490,12 @@ async fn start_elevated(paths: &AppPaths) -> Result<ManagedProcess> {
         &paths.sing_box_log.to_string_lossy(),
         &paths.sing_box_pid.to_string_lossy(),
     );
-    run_as_administrator(&command).await?;
+    crate::privileged::execute(
+        &command,
+        None,
+        Some(paths.sing_box_pid.to_string_lossy().into_owned()),
+    )
+    .await?;
 
     for _ in 0..30 {
         if let Ok(contents) = tokio::fs::read_to_string(&paths.sing_box_pid).await {
@@ -561,7 +566,10 @@ async fn stop_elevated(
     } else {
         Ok(())
     };
-    let _ = tokio::fs::remove_file(&paths.sing_box_pid).await;
+    if result.is_ok() {
+        crate::privileged::clear_cleanup().await?;
+        let _ = tokio::fs::remove_file(&paths.sing_box_pid).await;
+    }
     result
 }
 
@@ -582,30 +590,11 @@ async fn elevated_process_matches(paths: &AppPaths, pid: u32) -> bool {
 
 #[cfg(target_os = "macos")]
 async fn run_as_administrator(command: &str) -> Result<()> {
-    let escaped = command.replace('\\', "\\\\").replace('"', "\\\"");
-    let script = format!("do shell script \"{escaped}\" with administrator privileges");
-    let output = Command::new("/usr/bin/osascript")
-        .arg("-e")
-        .arg(script)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        Err(anyhow!(if message.is_empty() {
-            "administrator permission was denied".into()
-        } else {
-            message
-        }))
-    }
+    crate::privileged::execute(command, None, None).await
 }
 
 #[cfg(target_os = "macos")]
-fn shell_quote(value: &str) -> String {
+pub(crate) fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 

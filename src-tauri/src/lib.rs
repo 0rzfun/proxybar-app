@@ -1,5 +1,7 @@
 mod localization;
 mod model;
+#[cfg(target_os = "macos")]
+mod privileged;
 mod proxy;
 mod sing_box;
 mod subscription;
@@ -163,6 +165,16 @@ fn error_text(error: impl std::fmt::Display) -> String {
 }
 
 pub fn run() {
+    #[cfg(target_os = "macos")]
+    {
+        if privileged::run_if_requested() {
+            return;
+        }
+        // Remember denial for this session; switching/restart tasks must not re-prompt.
+        if let Err(error) = privileged::initialize() {
+            eprintln!("{error}");
+        }
+    }
     let app = tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             get_settings_state,
@@ -847,6 +859,8 @@ async fn quit(app: &AppHandle) {
         runtime.process.take()
     };
     let _ = proxy::stop_sing_box(&state.paths, process).await;
+    #[cfg(target_os = "macos")]
+    privileged::shutdown();
     app.exit(0);
 }
 
